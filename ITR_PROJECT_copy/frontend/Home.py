@@ -1,8 +1,8 @@
-import requests
 import streamlit as st
 
 from style import inject_css
 from utils import verdict_meta, normalize_risk
+from inference import models_loaded
 
 st.set_page_config(
     page_title="Credit Fraud Detection",
@@ -16,44 +16,25 @@ inject_css()
 # ---------------------------------------------------------------------
 # Shared app state (also read/written by pages/1_Live_Scanner.py)
 # ---------------------------------------------------------------------
-if "api_url" not in st.session_state:
-    st.session_state.api_url = "http://127.0.0.1:8000"
 if "last_result" not in st.session_state:
     st.session_state.last_result = None  # filled by the scanner page after a scan
 if "scan_count" not in st.session_state:
     st.session_state.scan_count = 0
 
 
-def check_backend(base_url: str) -> bool:
-    try:
-        r = requests.get(f"{base_url}/health", timeout=1.5)
-        return r.status_code == 200
-    except requests.exceptions.RequestException:
-        try:
-            r = requests.get(base_url, timeout=1.5)
-            return r.status_code < 500
-        except requests.exceptions.RequestException:
-            return False
-
-
 # ---------------------------------------------------------------------
-# Sidebar: connection settings, shared across pages via session_state
+# Sidebar
 # ---------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ Backend connection")
-    st.session_state.api_url = st.text_input(
-        "API base URL",
-        value=st.session_state.api_url,
-        help="Base URL of the FastAPI/Flask backend serving the ensemble model.",
-    )
-    online = check_backend(st.session_state.api_url)
-    dot_class = "status-online" if online else "status-offline"
-    status_text = "Backend online" if online else "Backend unreachable"
+    st.markdown("### 🛡️ Fraud Detection")
+    loaded = models_loaded()
+    dot_class = "status-online" if loaded else "status-offline"
+    status_text = "Models loaded" if loaded else "Models failed to load"
     st.markdown(
         f'<span class="status-dot {dot_class}"></span>{status_text}',
         unsafe_allow_html=True,
     )
-    st.caption("Checked live on every page load.")
+    st.caption("XGBoost · Isolation Forest · Autoencoder")
     st.divider()
     st.page_link("Home.py", label="Home", icon="🏠")
     st.page_link("pages/1_Live_Scanner.py", label="Live Scanner", icon="🔍")
@@ -142,9 +123,9 @@ st.markdown(
 )
 
 steps = [
-    ("Submit transaction details", "Amount, distance from home, merchant category, transaction type, and card network are sent to the backend as a single JSON payload."),
+    ("Submit transaction details", "Amount, distance from home, merchant category, transaction type, and card network are sent to the ensemble model."),
     ("Three models score it independently", "XGBoost outputs a fraud probability, Isolation Forest flags statistical outliers, and an Autoencoder flags high reconstruction error."),
-    ("Signals are combined into one verdict", "The backend merges the three signals into a single risk score and a final FRAUD / GENUINE decision, returned to the UI in real time."),
+    ("Signals are combined into one verdict", "The three signals are merged into a single risk score and a final FRAUD / GENUINE decision, displayed in real time."),
 ]
 for i, (title, desc) in enumerate(steps, start=1):
     st.markdown(

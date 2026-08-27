@@ -1,3 +1,4 @@
+--find-links https://download.pytorch.org/whl/cpu
 pandas
 numpy
 scikit-learn
@@ -6,10 +7,6 @@ imbalanced-learn
 matplotlib
 seaborn
 joblib
-fastapi
-uvicorn 
-pydantic
 streamlit
-requests
 plotly
-torch
+torch --index-url https://download.pytorch.org/whl/cpu

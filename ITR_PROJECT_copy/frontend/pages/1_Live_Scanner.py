@@ -1,8 +1,8 @@
-import requests
 import streamlit as st
 
 from style import inject_css
 from utils import normalize_risk, distance_band, risk_gauge, verdict_meta
+from inference import predict_fraud, models_loaded
 
 st.set_page_config(
     page_title="Live Scanner · Credit Fraud Detection",
@@ -14,41 +14,23 @@ st.set_page_config(
 inject_css()
 
 # ---------------------------------------------------------------------
-# Shared state (set on Home.py; default here too so this page also
-# works if someone lands on it directly)
+# Shared state
 # ---------------------------------------------------------------------
-if "api_url" not in st.session_state:
-    st.session_state.api_url = "http://127.0.0.1:8000"
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 if "scan_count" not in st.session_state:
     st.session_state.scan_count = 0
 
-API_URL = f"{st.session_state.api_url.rstrip('/')}/predict"
-
-
-def check_backend(base_url: str) -> bool:
-    try:
-        r = requests.get(f"{base_url}/health", timeout=1.5)
-        return r.status_code == 200
-    except requests.exceptions.RequestException:
-        try:
-            r = requests.get(base_url, timeout=1.5)
-            return r.status_code < 500
-        except requests.exceptions.RequestException:
-            return False
-
-
+# ---------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ Backend connection")
-    st.session_state.api_url = st.text_input(
-        "API base URL", value=st.session_state.api_url
-    )
-    online = check_backend(st.session_state.api_url)
-    dot_class = "status-online" if online else "status-offline"
+    st.markdown("### 🛡️ Fraud Detection")
+    loaded = models_loaded()
+    dot_class = "status-online" if loaded else "status-offline"
     st.markdown(
         f'<span class="status-dot {dot_class}"></span>'
-        f'{"Backend online" if online else "Backend unreachable"}',
+        f'{"Models loaded" if loaded else "Models failed to load"}',
         unsafe_allow_html=True,
     )
     st.divider()
@@ -70,12 +52,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if not online:
+if not loaded:
     st.markdown(
-        f"""
+        """
         <div class="hint-box" style="border-color: rgba(231,76,60,0.35); background: rgba(231,76,60,0.08); color:#ffb0a8;">
-        Backend at <b>{st.session_state.api_url}</b> is not responding. Start the API server,
-        or update the URL in the sidebar, before submitting a scan.
+        ML models could not be loaded. Please check that the <b>models/</b> directory
+        contains the required artifacts (scaler.pkl, xgboost.pkl, iso_forest.pkl,
+        autoencoder.pth, ae_threshold.pkl).
         </div>
         """,
         unsafe_allow_html=True,
@@ -142,95 +125,84 @@ with st.form("transaction_form"):
         )
         st.caption("Card network. Used as context by the model, not as a decision by itself.")
 
-    submit = st.form_submit_button("Analyze risk", disabled=not online)
+    submit = st.form_submit_button("Analyze risk", disabled=not loaded)
 
 # ---------------------------------------------------------------------
-# Submit → call backend → render results
+# Submit → run inference → render results
 # ---------------------------------------------------------------------
 if submit:
-    payload = {
-        "amount": amount,
-        "distance_from_home": distance,
-        "merchant_category": merchant_category,
-        "transaction_type": transaction_type,
-        "card_type": card_type,
-    }
-
-    with st.spinner("Analyzing transaction..."):
+    with st.spinner("Analyzing transaction…"):
         try:
-            response = requests.post(API_URL, json=payload, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                st.session_state.last_result = data
-                st.session_state.scan_count += 1
-
-                decision = data.get("final_decision", "UNKNOWN")
-                risk_score = data.get("risk_score", 0.0)
-                risk_pct = normalize_risk(risk_score)
-                verdict_class, verdict_copy = verdict_meta(decision)
-
-                indicator_class = "indicator-fraud" if decision == "FRAUD" else "indicator-genuine"
-                st.markdown(
-                    f"""
-                    <div class="result-panel">
-                        <div class="result-indicator {indicator_class}"></div>
-                        <div class="section-kicker">Result</div>
-                        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin:0.15rem 0 0.35rem 0;">
-                            <span class="verdict {verdict_class}">{decision}</span>
-                            <span style="color:var(--text-secondary);font-size:15px;">{verdict_copy}</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                gauge_col, bar_col = st.columns([1.15, 1])
-                with gauge_col:
-                    st.plotly_chart(
-                        risk_gauge(risk_score),
-                        use_container_width=True,
-                        config={"displayModeBar": False},
-                    )
-                with bar_col:
-                    st.markdown(
-                        f"<p style='color:#9aabc8;margin:0.4rem 0 0.35rem 0;'>Normalized risk ({risk_pct*100:.1f}%)</p>",
-                        unsafe_allow_html=True,
-                    )
-                    st.progress(risk_pct)
-                    st.caption(f"Raw risk_score from API: {float(risk_score):.4f}")
-                    st.caption("Green < 40% · Amber 40–70% · Red > 70%. Score is scaled to 0–100% for display only.")
-
-                st.markdown(
-                    '<div class="section-kicker" style="margin-top:0.4rem;">Model breakdown</div>',
-                    unsafe_allow_html=True,
-                )
-                m1, m2, m3, m4 = st.columns(4)
-                
-                xgb_val = f"{float(data.get('xgb_fraud_prob', 0.0)):.4f}"
-                with m1:
-                    st.markdown(f'<div class="model-breakdown-card model-xgb"><div class="model-title">XGBoost Prob</div><div class="model-value">{xgb_val}</div></div>', unsafe_allow_html=True)
-                
-                iso_val = "Anomaly" if data.get("iso_forest_anomaly") else "Normal"
-                with m2:
-                    st.markdown(f'<div class="model-breakdown-card model-iso"><div class="model-title">Isolation Forest</div><div class="model-value">{iso_val}</div></div>', unsafe_allow_html=True)
-                
-                ae_val = "Anomaly" if data.get("autoencoder_anomaly", False) else "Normal" if "autoencoder_anomaly" in data else "—"
-                with m3:
-                    st.markdown(f'<div class="model-breakdown-card model-ae"><div class="model-title">Autoencoder</div><div class="model-value">{ae_val}</div></div>', unsafe_allow_html=True)
-                
-                ae_mse = f"{float(data.get('autoencoder_mse', 0.0)):.4f}" if "autoencoder_mse" in data else "—"
-                with m4:
-                    st.markdown(f'<div class="model-breakdown-card model-ae"><div class="model-title">Autoencoder MSE</div><div class="model-value">{ae_mse}</div></div>', unsafe_allow_html=True)
-
-                with st.expander("Raw API response"):
-                    st.json(data)
-
-            else:
-                st.error(f"Error connecting to backend: {response.text}")
-        except requests.exceptions.ConnectionError:
-            st.error(
-                f"Failed to connect to the backend API at {st.session_state.api_url}. "
-                "Please ensure the backend server is running."
+            data = predict_fraud(
+                amount=amount,
+                distance_from_home=distance,
+                merchant_category=merchant_category,
+                transaction_type=transaction_type,
+                card_type=card_type,
             )
-        except requests.exceptions.Timeout:
-            st.error("The backend took too long to respond. Please try again.")
+            st.session_state.last_result = data
+            st.session_state.scan_count += 1
+
+            decision = data.get("final_decision", "UNKNOWN")
+            risk_score = data.get("risk_score", 0.0)
+            risk_pct = normalize_risk(risk_score)
+            verdict_class, verdict_copy = verdict_meta(decision)
+
+            indicator_class = "indicator-fraud" if decision == "FRAUD" else "indicator-genuine"
+            st.markdown(
+                f"""
+                <div class="result-panel">
+                    <div class="result-indicator {indicator_class}"></div>
+                    <div class="section-kicker">Result</div>
+                    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin:0.15rem 0 0.35rem 0;">
+                        <span class="verdict {verdict_class}">{decision}</span>
+                        <span style="color:var(--text-secondary);font-size:15px;">{verdict_copy}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            gauge_col, bar_col = st.columns([1.15, 1])
+            with gauge_col:
+                st.plotly_chart(
+                    risk_gauge(risk_score),
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
+            with bar_col:
+                st.markdown(
+                    f"<p style='color:#9aabc8;margin:0.4rem 0 0.35rem 0;'>Normalized risk ({risk_pct*100:.1f}%)</p>",
+                    unsafe_allow_html=True,
+                )
+                st.progress(risk_pct)
+                st.caption(f"Raw risk_score: {float(risk_score):.4f}")
+                st.caption("Green < 40% · Amber 40–70% · Red > 70%. Score is scaled to 0–100% for display only.")
+
+            st.markdown(
+                '<div class="section-kicker" style="margin-top:0.4rem;">Model breakdown</div>',
+                unsafe_allow_html=True,
+            )
+            m1, m2, m3, m4 = st.columns(4)
+
+            xgb_val = f"{float(data.get('xgb_fraud_prob', 0.0)):.4f}"
+            with m1:
+                st.markdown(f'<div class="model-breakdown-card model-xgb"><div class="model-title">XGBoost Prob</div><div class="model-value">{xgb_val}</div></div>', unsafe_allow_html=True)
+
+            iso_val = "Anomaly" if data.get("iso_forest_anomaly") else "Normal"
+            with m2:
+                st.markdown(f'<div class="model-breakdown-card model-iso"><div class="model-title">Isolation Forest</div><div class="model-value">{iso_val}</div></div>', unsafe_allow_html=True)
+
+            ae_val = "Anomaly" if data.get("autoencoder_anomaly", False) else "Normal" if "autoencoder_anomaly" in data else "—"
+            with m3:
+                st.markdown(f'<div class="model-breakdown-card model-ae"><div class="model-title">Autoencoder</div><div class="model-value">{ae_val}</div></div>', unsafe_allow_html=True)
+
+            ae_mse = f"{float(data.get('autoencoder_mse', 0.0)):.4f}" if "autoencoder_mse" in data else "—"
+            with m4:
+                st.markdown(f'<div class="model-breakdown-card model-ae"><div class="model-title">Autoencoder MSE</div><div class="model-value">{ae_mse}</div></div>', unsafe_allow_html=True)
+
+            with st.expander("Raw model output"):
+                st.json(data)
+
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
